@@ -1,0 +1,65 @@
+
+name: Build MyNoteList APK
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [ main ]
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Extract Android project archive
+        run: unzip -q MyNoteList-Android.zip -d .
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Set up Java
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '21'
+
+      - name: Set up Android SDK
+        uses: android-actions/setup-android@v3
+
+      - name: Install dependencies
+        working-directory: MyNoteList-Android
+        run: npm install
+
+      - name: Build web assets
+        working-directory: MyNoteList-Android
+        run: npm run build
+
+      - name: Generate Android project
+        working-directory: MyNoteList-Android
+        run: npx cap add android
+
+      - name: Add exact-alarm permission
+        working-directory: MyNoteList-Android
+        run: node scripts/patch-android-manifest.mjs
+
+      - name: Sync Capacitor plugins
+        working-directory: MyNoteList-Android
+        run: npx cap sync android
+
+      - name: Build debug APK
+        working-directory: MyNoteList-Android/android
+        run: ./gradlew assembleDebug
+
+      - name: Upload APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: MyNoteList-debug-apk
+          path: MyNoteList-Android/android/app/build/outputs/apk/debug/app-debug.apk
+          if-no-files-found: error
