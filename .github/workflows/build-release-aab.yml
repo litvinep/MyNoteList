@@ -1,0 +1,131 @@
+
+name: Build MyNoteList release AAB
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Extract Android project archive
+        run: unzip -q MyNoteList-Android-AdMob.zip -d .
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Set up Java
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '21'
+
+      - name: Set up Android SDK
+        uses: android-actions/setup-android@v3
+        with:
+          packages: platform-tools
+
+      - name: Install dependencies
+        working-directory: MyNoteList-Android
+        run: npm install
+
+      - name: Build web assets
+        working-directory: MyNoteList-Android
+        run: npm run build
+
+      - name: Generate Android project
+        working-directory: MyNoteList-Android
+        run: npx cap add android
+
+      - name: Add exact-alarm permission
+        working-directory: MyNoteList-Android
+        run: node scripts/patch-android-manifest.mjs
+
+      - name: Sync Capacitor plugins
+        working-directory: MyNoteList-Android
+        run: npx cap sync android
+
+      - name: Decode release keystore
+        env:
+          ANDROID_KEYSTORE_BASE64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
+        run: |
+          echo "$ANDROID_KEYSTORE_BASE64" | base64 --decode > "$RUNNER_TEMP/mynotelist-release.jks"
+
+      - name: Configure release signing
+        working-directory: MyNoteList-Android/android
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+          import re
+
+          path = Path("app/build.gradle")
+          source = path.read_text()
+
+          def block_end(text, opening_brace):
+              depth = 0
+              for index in range(opening_brace, len(text)):
+                  if text[index] == "{":
+                      depth += 1
+                  elif text[index] == "}":
+                      depth -= 1
+                      if depth == 0:
+                          return index
+              raise RuntimeError("Could not find matching closing brace")
+
+          android_match = re.search(r"\bandroid\s*\{", source)
+          if not android_match:
+              raise RuntimeError("Could not find android block")
+
+          android_open = source.find("{", android_match.start())
+          signing = """
+              signingConfigs {
+                  release {
+                      storeFile file(System.getenv("ANDROID_KEYSTORE_PATH"))
+                      storePassword System.getenv("ANDROID_KEYSTORE_PASSWORD")
+                      keyAlias System.getenv("ANDROID_KEY_ALIAS")
+                      keyPassword System.getenv("ANDROID_KEY_PASSWORD")
+                  }
+              }
+          """
+          source = source[:android_open + 1] + "\n" + signing + source[android_open + 1:]
+
+          build_types_match = re.search(r"\bbuildTypes\s*\{", source)
+          if not build_types_match:
+              raise RuntimeError("Could not find buildTypes block")
+
+          build_types_open = source.find("{", build_types_match.start())
+          build_types_end = block_end(source, build_types_open)
+          release_match = re.search(r"\brelease\s*\{", source[build_types_open + 1:build_types_end])
+          if not release_match:
+              raise RuntimeError("Could not find release block")
+
+          release_open = source.find("{", build_types_open + 1 + release_match.start())
+          source = source[:release_open + 1] + "\n            signingConfig signingConfigs.release" + source[release_open + 1:]
+
+          path.write_text(source)
+          print("Release signing configured.")
+          PY
+
+      - name: Build signed release AAB
+        working-directory: MyNoteList-Android/android
+        env:
+          ANDROID_KEYSTORE_PATH: ${{ runner.temp }}/mynotelist-release.jks
+          ANDROID_KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
+          ANDROID_KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
+          ANDROID_KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
+        run: ./gradlew bundleRelease
+
+      - name: Upload signed AAB
+        uses: actions/upload-artifact@v4
+        with:
+          name: MyNoteList-release-AAB
+          path: MyNoteList-Android/android/app/build/outputs/bundle/release/app-release.aab
+          if-no-files-found: error
